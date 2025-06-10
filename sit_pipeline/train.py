@@ -23,14 +23,14 @@ from time import time
 import argparse
 import logging
 import os
-
-from sit_pipeline.models import SiT_models
-from sit_pipeline.download import find_model
+from torchvision.utils import save_image
+from models import SiT_models
+from download import find_model
 from transport import create_transport, Sampler
 from diffusers.models import AutoencoderKL
 from train_utils import parse_transport_args
 import wandb_utils
-
+from dataset import SiTDataset
 
 #################################################################################
 #                             Training Helper Functions                         #
@@ -48,7 +48,6 @@ def update_ema(ema_model, model, decay=0.9999):
         # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
-
 def requires_grad(model, flag=True):
     """
     Set requires_grad flag for all parameters in a model.
@@ -56,13 +55,11 @@ def requires_grad(model, flag=True):
     for p in model.parameters():
         p.requires_grad = flag
 
-
 def cleanup():
     """
     End DDP training.
     """
     dist.destroy_process_group()
-
 
 def create_logger(logging_dir):
     """
@@ -80,7 +77,6 @@ def create_logger(logging_dir):
         logger = logging.getLogger(__name__)
         logger.addHandler(logging.NullHandler())
     return logger
-
 
 def center_crop_arr(pil_image, image_size):
     """
@@ -101,7 +97,6 @@ def center_crop_arr(pil_image, image_size):
     crop_y = (arr.shape[0] - image_size) // 2
     crop_x = (arr.shape[1] - image_size) // 2
     return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
-
 
 #################################################################################
 #                                  Training Loop                                #
@@ -137,8 +132,8 @@ def main(args):
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
 
-        entity = os.environ["ENTITY"]
-        project = os.environ["PROJECT"]
+        entity = "test_entity"
+        project = "test_project"
         if args.wandb:
             wandb_utils.initialize(args, entity, experiment_name, project)
     else:
@@ -182,12 +177,15 @@ def main(args):
 
     # Setup data:
     transform = transforms.Compose([
+        transforms.Resize(256),
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
     ])
-    dataset = ImageFolder(args.data_path, transform=transform)
+
+    dataset = SiTDataset("data/chair_data", transform=transform)
+    
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -195,6 +193,7 @@ def main(args):
         shuffle=True,
         seed=args.global_seed
     )
+    
     loader = DataLoader(
         dataset,
         batch_size=local_batch_size,
@@ -204,7 +203,7 @@ def main(args):
         pin_memory=True,
         drop_last=True
     )
-    logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
+    logger.info(f"Dataset contains {len(dataset):,} images")
 
     # Prepare models for training:
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
@@ -218,30 +217,48 @@ def main(args):
     start_time = time()
 
     # Labels to condition the model with (feel free to change):
-    ys = torch.randint(1000, size=(local_batch_size,), device=device)
+    ys = torch.zeros(local_batch_size, dtype=torch.long, device=device)
     use_cfg = args.cfg_scale > 1.0
-    # Create sampling noise:
-    n = ys.size(0)
-    zs = torch.randn(n, 4, latent_size, latent_size, device=device)
+    
+    # # Create sampling noise:
+    # n = ys.size(0)
+    # zs = torch.randn(n, 4, latent_size, latent_size, device=device)
 
-    # Setup classifier-free guidance:
-    if use_cfg:
-        zs = torch.cat([zs, zs], 0)
-        y_null = torch.tensor([1000] * n, device=device)
-        ys = torch.cat([ys, y_null], 0)
-        sample_model_kwargs = dict(y=ys, cfg_scale=args.cfg_scale)
-        model_fn = ema.forward_with_cfg
-    else:
-        sample_model_kwargs = dict(y=ys)
-        model_fn = ema.forward
+    # # Setup classifier-free guidance:
+    # if use_cfg:
+    #     zs = torch.cat([zs, zs], 0)
+    #     y_null = torch.tensor([1] * n, device=device)
+    #     ys = torch.cat([ys, y_null], 0)
+    #     sample_model_kwargs = dict(y=ys, cfg_scale=args.cfg_scale)
+    #     model_fn = ema.forward_with_cfg
+    # else:
+    #     sample_model_kwargs = dict(y=ys)
+    #     model_fn = ema.forward
 
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
-        for x, y in loader:
+        for x, zs in loader:
             x = x.to(device)
-            y = y.to(device)
+            zs = zs.to(device)
+            y = torch.IntTensor([0]).to(device)
+
+            # Create sampling noise:
+            n = ys.size(0)
+            
+            # Setup classifier-free guidance:
+            if use_cfg:
+                zs = torch.cat([zs, zs], 0)
+                y_null = torch.tensor([1] * n, device=device)
+                ys = torch.cat([ys, y_null], 0)
+                sample_model_kwargs = dict(y=ys, cfg_scale=args.cfg_scale)
+                model_fn = ema.forward_with_cfg
+            else:
+                sample_model_kwargs = dict(y=ys)
+                model_fn = ema.forward
+
+            
             with torch.no_grad():
                 # Map input images to latent space + normalize latents:
                 x = vae.encode(x).latent_dist.sample().mul_(0.18215)
@@ -300,11 +317,22 @@ def main(args):
                 if use_cfg: #remove null samples
                     samples, _ = samples.chunk(2, dim=0)
                 samples = vae.decode(samples / 0.18215).sample
+
+                save_image(samples, 
+                           f"samples/sample_{epoch}.png", 
+                           nrow=int(4),
+                           normalize=True, value_range=(-1, 1))
+                
                 out_samples = torch.zeros((args.global_batch_size, 3, args.image_size, args.image_size), device=device)
                 dist.all_gather_into_tensor(out_samples, samples)
+                
                 if args.wandb:
                     wandb_utils.log_image(out_samples, train_steps)
                 logging.info("Generating EMA samples done.")
+
+                del sample_fn
+                del out_samples
+                del samples
 
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
@@ -316,7 +344,6 @@ def main(args):
 if __name__ == "__main__":
     # Default args here will train SiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--model", type=str, choices=list(SiT_models.keys()), default="SiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
@@ -337,3 +364,7 @@ if __name__ == "__main__":
     parse_transport_args(parser)
     args = parser.parse_args()
     main(args)
+
+    """Github commits: added the sit repo, created and added the dataset class (with pose reshaping),
+    fixed out of memory error
+    """
