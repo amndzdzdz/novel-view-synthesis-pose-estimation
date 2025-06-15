@@ -39,14 +39,16 @@ class SiTDataset(Dataset):
 
         noise = self._make_gaussian_noise(0, 1, (4, 32, 32))
 
-        # pose = pose.reshape(1,16)
-        # pose = np.tile(pose, (32,2))
-        # pose = np.stack([pose]*4)
-        # pose = torch.tensor(pose)
-
-        pose = np.tile(pose, (8,8))
-        pose = np.stack([pose]*4, axis=0)
+        pose = pose.reshape(1,16)
+        pose = np.tile(pose, (32,2))
+        pose = np.stack([pose]*4)
+        pose = noise + pose
         pose = torch.tensor(pose)
+        pose = pose.to(torch.float32)
+
+#        pose = np.tile(pose, (8,8))
+#       pose = np.stack([pose]*4, axis=0)
+#      pose = torch.tensor(pose)
         
         return image, pose
 
