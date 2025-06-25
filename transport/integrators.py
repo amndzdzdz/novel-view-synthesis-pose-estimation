@@ -87,18 +87,41 @@ class ode:
         atol,
         rtol,
     ):
-        assert t0 < t1, "ODE sampler has to be in forward time"
+        #assert t0 < t1, "ODE sampler has to be in forward time"
 
         self.drift = drift
         self.t = th.linspace(t0, t1, num_steps)
+        self.t0 = t0
+        self.t1 = t1
         self.atol = atol
         self.rtol = rtol
         self.sampler_type = sampler_type
 
+    def sample_backwards(self, x, model, **model_kwargs):
+        device = x.device if isinstance(x, th.Tensor) else x[0].device
+    
+        def _fn(t, x):
+            t_batch = th.full((x.size(0),), t, device=device)
+            ones = th.ones(x.size(0), device=device)
+            return self.drift(x, ones - t_batch, model, **model_kwargs)
+    
+        t = self.t.to(device)
+        x_out = x
+    
+        for i in range(len(t) - 1):
+            t_start = t[i]
+            t_end = t[i + 1]
+            h = (t_end - t_start).item()
+            x_out = x_out - h * _fn(t_end.item(), x_out)
+    
+        return x_out
+
+    #x is our z in inference time
     def sample(self, x, model, **model_kwargs):
         
         device = x[0].device if isinstance(x, tuple) else x.device
         def _fn(t, x):
+            #This reshapes our t into a batch of t's
             t = th.ones(x[0].size(0)).to(device) * t if isinstance(x, tuple) else th.ones(x.size(0)).to(device) * t
             model_output = self.drift(x, t, model, **model_kwargs)
             return model_output

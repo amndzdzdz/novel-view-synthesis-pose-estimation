@@ -1,9 +1,7 @@
 import torch as th
 import numpy as np
 import logging
-
 import enum
-
 from . import path
 from .utils import EasyDict, log_state, mean_flat
 from .integrators import ode, sde
@@ -34,7 +32,6 @@ class WeightType(enum.Enum):
     NONE = enum.auto()
     VELOCITY = enum.auto()
     LIKELIHOOD = enum.auto()
-
 
 class Transport:
 
@@ -69,7 +66,6 @@ class Transport:
         _fn = lambda x: -N / 2. * np.log(2 * np.pi) - th.sum(x ** 2) / 2.
         return th.vmap(_fn)(z)
     
-
     def check_interval(
         self, 
         train_eps, 
@@ -88,9 +84,11 @@ class Transport:
 
             t1 = 1 - eps if (not sde or last_step_size == 0) else 1 - last_step_size
 
+        #This is what we have since Pathtype is Linear which corresponds to path.ICPlan
         elif (type(self.path_sampler) in [path.ICPlan, path.GVPCPlan]) \
             and (self.model_type != ModelType.VELOCITY or sde): # avoid numerical issue by taking a first semi-implicit step
 
+            print("We here baby!")
             t0 = eps if (diffusion_form == "SBDM" and sde) or self.model_type != ModelType.VELOCITY else 0
             t1 = 1 - eps if (not sde or last_step_size == 0) else 1 - last_step_size
         
@@ -337,6 +335,40 @@ class Sampler:
             return xs
 
         return _sample
+
+    def sample_ode_backwards(
+        self,
+        *,
+        sampling_method="dopri5",
+        num_steps=50,
+        atol=1e-6,
+        rtol=1e-3,
+        reverse
+    ):
+        #This is the model prediction i. e. drift = flow(x, t)
+        drift = self.drift
+
+        #This just sets the timesteps t0 = 0 and t1=1 based on self.transport.train_eps = 0 and self.transport.sample_eps = 0
+        t0, t1 = self.transport.check_interval(
+        self.transport.train_eps, #small epsion for stability in training
+        self.transport.sample_eps, #small epsilon for stability in sampling
+        sde=False,
+        eval=True,
+        reverse=reverse,
+        last_step_size=0.0)
+
+        _ode = ode(
+            drift=drift,
+            t0=t0,
+            t1=t1,
+            sampler_type=sampling_method,
+            num_steps=num_steps,
+            atol=atol,
+            rtol=rtol,
+        )
+
+        return _ode.sample_backwards
+        
     
     def sample_ode(
         self,
@@ -359,6 +391,7 @@ class Sampler:
         """
         if reverse:
             drift = lambda x, t, model, **kwargs: self.drift(x, th.ones_like(t) * (1 - t), model, **kwargs)
+            
         else:
             drift = self.drift
 
