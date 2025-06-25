@@ -5,20 +5,23 @@ from torchvision import transforms
 import torch
 
 class SiTDataset(Dataset):
-    
-    def __init__(self, pth=None, transform=None):
+
+    def __init__(self, pth=None, transform=None, image_size=256):   
         self.pth = []
         self.images = []
         self.poses = []
         self.focal_length = []
         self.transform = transform
-        
+
+        self.image_size = image_size                      
+        self.latent_size = image_size // 8                
+
         if pth is not None:
             self.pth = pth
 
             images_list = []
             poses_list = []
-            
+
             for filename in os.listdir(pth):
                 filepath = os.path.join(pth, filename)
                 loaded = np.load(filepath)
@@ -37,27 +40,24 @@ class SiTDataset(Dataset):
             image = self._to_pil_image(image)
             image = self.transform(image)
 
-        noise = self._make_gaussian_noise(0, 1, (4, 32, 32))
+        noise = self._make_gaussian_noise(0, 1, (4, self.latent_size, self.latent_size))   
 
         pose = pose.reshape(1,16)
-        pose = np.tile(pose, (32,2))
-        pose = np.stack([pose]*4)
-        pose = torch.tensor(pose)
+        pose_block = np.tile(pose, (self.latent_size * self.latent_size // 16, 1)).reshape(self.latent_size, self.latent_size)  # (latent_size, latent_size)
+        pose = np.stack([pose_block]*4)
 
-        pose = noise + pose
+        pose = pose + noise
 
-        pose = pose.to(torch.float32)
-        
+        pose = torch.tensor(pose, dtype=torch.float32)
+
         return image, pose
 
     def _to_pil_image(self, image):
-
         return transforms.ToPILImage()(image)
 
     def _make_gaussian_noise(self, mean: float, std: float, size: tuple):
         noise = np.random.normal(mean, std, size)
-        
-        return torch.tensor(noise)
+        return noise
 
     def __len__(self):
         if self.images is not None:
