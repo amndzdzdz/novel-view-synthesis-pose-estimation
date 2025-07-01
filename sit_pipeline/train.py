@@ -1,9 +1,5 @@
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+# train.py
 
-"""
-A minimal training script for SiT using PyTorch DDP.
-"""
 import torch
 # the first flag below was False when we tested this script but True makes A100 training a lot faster:
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -12,7 +8,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
 from torchvision import transforms
 import numpy as np
 from collections import OrderedDict
@@ -31,6 +26,7 @@ from diffusers.models import AutoencoderKL
 from train_utils import parse_transport_args
 import wandb_utils
 from dataset import SiTDataset
+from torch.amp import autocast
 
 #################################################################################
 #                             Training Helper Functions                         #
@@ -45,7 +41,6 @@ def update_ema(ema_model, model, decay=0.9999):
     model_params = OrderedDict(model.named_parameters())
 
     for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
 def requires_grad(model, flag=True):
@@ -120,14 +115,14 @@ def main(args):
     local_batch_size = int(args.global_batch_size // dist.get_world_size())
 
     # Setup an experiment folder:
+    os.makedirs(args.results_dir, exist_ok=True)
+    experiment_index = len(glob(f"{args.results_dir}/*"))
+    model_string_name = args.model.replace("/", "-")
+    experiment_name = f"{experiment_index:03d}-{model_string_name}-" \
+                    f"{args.path_type}-{args.prediction}-{args.loss_weight}"
+    experiment_dir = f"{args.results_dir}/{experiment_name}"
+    checkpoint_dir = f"{experiment_dir}/checkpoints"
     if rank == 0:
-        os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
-        experiment_index = len(glob(f"{args.results_dir}/*"))
-        model_string_name = args.model.replace("/", "-")  # e.g., SiT-XL/2 --> SiT-XL-2 (for naming folders)
-        experiment_name = f"{experiment_index:03d}-{model_string_name}-" \
-                        f"{args.path_type}-{args.prediction}-{args.loss_weight}"
-        experiment_dir = f"{args.results_dir}/{experiment_name}"  # Create an experiment folder
-        checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
@@ -147,19 +142,24 @@ def main(args):
         num_classes=args.num_classes
     )
 
-    # Note that parameter initialization is done within the SiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
 
     if args.ckpt is not None:
         ckpt_path = args.ckpt
-        state_dict = find_model(ckpt_path)
-        model.load_state_dict(state_dict["model"])
-        ema.load_state_dict(state_dict["ema"])
-        opt.load_state_dict(state_dict["opt"])
-        args = state_dict["args"]
+        checkpoint = torch.load(ckpt_path, map_location=f"cuda:{device}", weights_only=False)
+        model.load_state_dict(checkpoint["model"])
+        ema.load_state_dict(checkpoint["ema"])
+        opt.load_state_dict(checkpoint["opt"])
+        args = checkpoint["args"]
+        device_obj = torch.device(f"cuda:{device}")
+        for state in opt.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device_obj)
 
     requires_grad(ema, False)
-    
+
     model = DDP(model.to(device), device_ids=[rank])
     transport = create_transport(
         args.path_type,
@@ -167,25 +167,19 @@ def main(args):
         args.loss_weight,
         args.train_eps,
         args.sample_eps
-    )  # default: velocity; 
+    )
     transport_sampler = Sampler(transport)
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
-
     # Setup data:
     transform = transforms.Compose([
-        transforms.Resize(256),
+        transforms.Resize(args.image_size),
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+        transforms.Normalize(mean=[0, 0, 0], std=[1, 1, 1], inplace=True)
     ])
-
-    dataset = SiTDataset("data/chair_data", transform=transform)
-    
+    dataset = SiTDataset("data/chair_data/train", transform=transform, image_size=args.image_size)
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -193,7 +187,6 @@ def main(args):
         shuffle=True,
         seed=args.global_seed
     )
-    
     loader = DataLoader(
         dataset,
         batch_size=local_batch_size,
@@ -219,35 +212,17 @@ def main(args):
     # Labels to condition the model with (feel free to change):
     ys = torch.zeros(local_batch_size, dtype=torch.long, device=device)
     use_cfg = args.cfg_scale > 1.0
-    
-    # # Create sampling noise:
-    # n = ys.size(0)
-    # zs = torch.randn(n, 4, latent_size, latent_size, device=device)
-
-    # # Setup classifier-free guidance:
-    # if use_cfg:
-    #     zs = torch.cat([zs, zs], 0)
-    #     y_null = torch.tensor([1] * n, device=device)
-    #     ys = torch.cat([ys, y_null], 0)
-    #     sample_model_kwargs = dict(y=ys, cfg_scale=args.cfg_scale)
-    #     model_fn = ema.forward_with_cfg
-    # else:
-    #     sample_model_kwargs = dict(y=ys)
-    #     model_fn = ema.forward
 
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
-        for x, zs in loader:
+        for x, zs, _, _ in loader:
             x = x.to(device)
             zs = zs.to(device)
             y = torch.IntTensor([0]).to(device)
-
-            # Create sampling noise:
             n = ys.size(0)
-            
-            # Setup classifier-free guidance:
+
             if use_cfg:
                 zs = torch.cat([zs, zs], 0)
                 y_null = torch.tensor([1] * n, device=device)
@@ -258,28 +233,28 @@ def main(args):
                 sample_model_kwargs = dict(y=ys)
                 model_fn = ema.forward
 
-            
             with torch.no_grad():
-                # Map input images to latent space + normalize latents:
-                x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-            model_kwargs = dict(y=y)
-            loss_dict = transport.training_losses(model, x, model_kwargs)
-            loss = loss_dict["loss"].mean()
+                x_latent = vae.encode(x).latent_dist.sample().mul_(0.18215)
+            model_kwargs = dict(y=y, noise=zs)  # <--- Pass noisy pose as noise
+
+            with autocast("cuda", dtype=torch.bfloat16):
+                loss_dict = transport.training_losses(model, x_latent, model_kwargs)
+                loss = loss_dict["loss"].mean()
+
             opt.zero_grad()
             loss.backward()
             opt.step()
             update_ema(ema, model.module)
 
-            # Log loss values:
             running_loss += loss.item()
             log_steps += 1
             train_steps += 1
+            print(train_steps)
+            
             if train_steps % args.log_every == 0:
-                # Measure training speed:
                 torch.cuda.synchronize()
                 end_time = time()
                 steps_per_sec = log_steps / (end_time - start_time)
-                # Reduce loss history over all processes:
                 avg_loss = torch.tensor(running_loss / log_steps, device=device)
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
@@ -289,13 +264,12 @@ def main(args):
                         { "train loss": avg_loss, "train steps/sec": steps_per_sec },
                         step=train_steps
                     )
-                # Reset monitoring variables:
                 running_loss = 0
                 log_steps = 0
                 start_time = time()
 
-            # Save SiT checkpoint:
             if train_steps % args.ckpt_every == 0 and train_steps > 0:
+                print("current epoch:", epoch)
                 if rank == 0:
                     checkpoint = {
                         "model": model.module.state_dict(),
@@ -307,51 +281,35 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
-            
-            if train_steps % args.sample_every == 0 and train_steps > 0:
-                logger.info("Generating EMA samples...")
-                sample_fn = transport_sampler.sample_ode() # default to ode sampling
-                samples = sample_fn(zs, model_fn, **sample_model_kwargs)[-1]
-                dist.barrier()
 
-                if use_cfg: #remove null samples
-                    samples, _ = samples.chunk(2, dim=0)
-                samples = vae.decode(samples / 0.18215).sample
+#            if train_steps % args.sample_every == 0 and train_steps > 0:
+ #               if rank == 0:
+  #                  ema_sampling_dir = os.path.join(experiment_dir, "ema_sampling_checkpoints")
+   #                 os.makedirs(ema_sampling_dir, exist_ok=True)
+    #                ema_ckpt = {
+     #                   "ema": ema.state_dict(),
+      #                  "step": train_steps,
+       #                 "args": args,
+        #            }
+         #           ema_ckpt_path = os.path.join(ema_sampling_dir, f"ema_sampling_{train_steps:07d}.pt")
+          #          torch.save(ema_ckpt, ema_ckpt_path)
+           #         logger.info(f"Saved EMA checkpoint for sampling at step {train_steps}")
+            #    dist.barrier()
 
-                save_image(samples, 
-                           f"samples/sample_{epoch}.png", 
-                           nrow=int(4),
-                           normalize=True, value_range=(-1, 1))
-                
-                out_samples = torch.zeros((args.global_batch_size, 3, args.image_size, args.image_size), device=device)
-                dist.all_gather_into_tensor(out_samples, samples)
-                
-                if args.wandb:
-                    wandb_utils.log_image(out_samples, train_steps)
-                logging.info("Generating EMA samples done.")
-
-                del sample_fn
-                del out_samples
-                del samples
-
-    model.eval()  # important! This disables randomized embedding dropout
-    # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
-
+    model.eval()
     logger.info("Done!")
     cleanup()
 
-
 if __name__ == "__main__":
-    # Default args here will train SiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--model", type=str, choices=list(SiT_models.keys()), default="SiT-XL/2")
-    parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
+    parser.add_argument("--image-size", type=int, choices=[128, 256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
+    parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=50_000)
@@ -360,11 +318,6 @@ if __name__ == "__main__":
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--ckpt", type=str, default=None,
                         help="Optional path to a custom SiT checkpoint")
-
     parse_transport_args(parser)
     args = parser.parse_args()
     main(args)
-
-    """Github commits: added the sit repo, created and added the dataset class (with pose reshaping),
-    fixed out of memory error
-    """
