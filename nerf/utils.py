@@ -2,12 +2,11 @@
 This code is taken by my supervisor Ulrich Prestel, PHD student at LMU Munich.
 https://github.com/uprestel/AutoNeRF
 """
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import torch
 import torchvision
-from typing import Optional
-import torch
 import torch.nn.functional as F
 
 def quaternion_to_matrix(quaternions):

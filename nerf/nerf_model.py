@@ -1,12 +1,10 @@
 """
-This code is taken by my supervisor Ulrich Prestel, PHD student at LMU Munich.
+This code is taken from my supervisor Ulrich Prestel, PHD student at LMU Munich.
 https://github.com/uprestel/AutoNeRF
 """
+from typing import Optional
 
 import torch
-import torch.nn as nn
-from typing import Optional
-import matplotlib.pyplot as plt
 
 # Chunksize (Note: this isn't batchsize in the conventional sense. This only
 # specifies the number of rays to be queried in one go. Backprop still happens

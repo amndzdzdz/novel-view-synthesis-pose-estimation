@@ -1,11 +1,9 @@
 """
-This code is taken by my supervisor Ulrich Prestel, PHD student at LMU Munich.
+This code is taken from my supervisor Ulrich Prestel, PHD student at LMU Munich.
 https://github.com/uprestel/AutoNeRF
 """
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, utils
 import numpy as np
-
+from torch.utils.data import Dataset
 
 class NeRF_Dataset(Dataset):
     def __init__(self, pth=None):
