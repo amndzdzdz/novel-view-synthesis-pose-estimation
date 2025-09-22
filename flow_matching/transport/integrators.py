@@ -1,9 +1,5 @@
-import numpy as np
 import torch as th
-import torch.nn as nn
 from torchdiffeq import odeint
-from functools import partial
-from tqdm import tqdm
 
 class sde:
     """SDE solver class"""
@@ -58,7 +54,6 @@ class sde:
             sampler = sampler_dict[self.sampler_type]
         except:
             raise NotImplementedError("Smapler type not implemented.")
-    
         return sampler
 
     def sample(self, init, model, **model_kwargs):
@@ -71,7 +66,6 @@ class sde:
             with th.no_grad():
                 x, mean_x = sampler(x, mean_x, ti, model, **model_kwargs)
                 samples.append(x)
-
         return samples
 
 class ode:
@@ -99,7 +93,7 @@ class ode:
 
     def sample_backwards(self, x, model, **model_kwargs):
         device = x.device if isinstance(x, th.Tensor) else x[0].device
-    
+
         def _fn(t, x):
             t_batch = th.full((x.size(0),), t, device=device)
             ones = th.ones(x.size(0), device=device)
@@ -118,7 +112,6 @@ class ode:
 
     #x is our z in inference time
     def sample(self, x, model, **model_kwargs):
-        
         device = x[0].device if isinstance(x, tuple) else x.device
         def _fn(t, x):
             #This reshapes our t into a batch of t's

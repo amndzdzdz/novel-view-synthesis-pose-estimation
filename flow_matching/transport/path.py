@@ -1,6 +1,5 @@
 import torch as th
 import numpy as np
-from functools import partial
 
 def expand_t_like_x(t, x):
     """Function to reshape time t to broadcastable dimension of x
@@ -11,9 +10,6 @@ def expand_t_like_x(t, x):
     dims = [1] * (len(x.size()) - 1)
     t = t.view(t.size(0), *dims)
     return t
-
-
-#################### Coupling Plans ####################
 
 class ICPlan:
     """Linear Coupling Plan"""
@@ -39,7 +35,6 @@ class ICPlan:
         sigma_t, d_sigma_t = self.compute_sigma_t(t)
         drift = alpha_ratio * x
         diffusion = alpha_ratio * (sigma_t ** 2) - sigma_t * d_sigma_t
-
         return -drift, diffusion
 
     def compute_diffusion(self, x, t, form="constant", norm=1.0):
@@ -64,7 +59,6 @@ class ICPlan:
             diffusion = choices[form]
         except KeyError:
             raise NotImplementedError(f"Diffusion form {form} not implemented")
-        
         return diffusion
 
     def get_score_from_velocity(self, velocity, x, t):
@@ -135,7 +129,6 @@ class ICPlan:
         ut = self.compute_ut(t, x0, x1, xt)
         return t, xt, ut
     
-
 class VPCPlan(ICPlan):
     """class for VP path flow matching"""
 
@@ -144,7 +137,6 @@ class VPCPlan(ICPlan):
         self.sigma_max = sigma_max
         self.log_mean_coeff = lambda t: -0.25 * ((1 - t) ** 2) * (self.sigma_max - self.sigma_min) - 0.5 * (1 - t) * self.sigma_min 
         self.d_log_mean_coeff = lambda t: 0.5 * (1 - t) * (self.sigma_max - self.sigma_min) + 0.5 * self.sigma_min
-
 
     def compute_alpha_t(self, t):
         """Compute coefficient of x1"""
@@ -169,7 +161,6 @@ class VPCPlan(ICPlan):
         t = expand_t_like_x(t, x)
         beta_t = self.sigma_min + (1 - t) * (self.sigma_max - self.sigma_min)
         return -0.5 * beta_t * x, beta_t / 2
-    
 
 class GVPCPlan(ICPlan):
     def __init__(self, sigma=0.0):

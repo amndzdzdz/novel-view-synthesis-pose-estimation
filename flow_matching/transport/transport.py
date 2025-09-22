@@ -1,9 +1,10 @@
-import torch as th
-import numpy as np
-import logging
 import enum
 from . import path
-from .utils import EasyDict, log_state, mean_flat
+
+import torch as th
+import numpy as np
+
+from .utils import mean_flat
 from .integrators import ode, sde
 
 class ModelType(enum.Enum):
@@ -97,38 +98,47 @@ class Transport:
 
         return t0, t1
 
-
-    def sample(self, x1):
-        """Sampling x0 & t based on shape of x1 (if needed)
-          Args:
+    def sample(self, x1, noise=None):
+        """Add commentMore actions
+        Sampling x0 & t based on shape of x1 (if needed).
+        Allows optional external noise input.
+        Args:
             x1 - data point; [batch, *dim]
+            noise - custom noise tensor (optional)
         """
         
-        x0 = th.randn_like(x1)
+        x0 = noise if noise is not None else th.randn_like(x1)
         t0, t1 = self.check_interval(self.train_eps, self.sample_eps)
         t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
         t = t.to(x1)
         return t, x0, x1
     
-
     def training_losses(
         self, 
         model,  
         x1, 
         model_kwargs=None
     ):
-        """Loss for training the score model
-        Args:
-        - model: backbone model; could be score, noise, or velocity
-        - x1: datapoint
-        - model_kwargs: additional arguments for the model
         """
-        if model_kwargs == None:
+        Loss for training the score model.
+        Args:
+            model: backbone model; could be score, noise, or velocity
+            x1: datapoint
+            model_kwargs: additional arguments for the model
+        """
+        if model_kwargs is None:
             model_kwargs = {}
-        
-        t, x0, x1 = self.sample(x1)
+        # If provided, use the custom noise instead of standard Gaussian
+        noise = model_kwargs.get('noise', None)
+        t, x0, x1 = self.sample(x1, noise=noise)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
-        model_output = model(xt, t, **model_kwargs)
+
+        # Remove 'noise' from model_kwargs for model call
+        model_call_kwargs = dict(model_kwargs)
+        if 'noise' in model_call_kwargs:
+            del model_call_kwargs['noise']
+
+        model_output = model(xt, t, **model_call_kwargs)
         B, *_, C = xt.shape
         assert model_output.size() == (B, *xt.size()[1:-1], C)
 
@@ -152,10 +162,8 @@ class Transport:
                 terms['loss'] = mean_flat(weight * ((model_output - x0) ** 2))
             else:
                 terms['loss'] = mean_flat(weight * ((model_output * sigma_t + x0) ** 2))
-                
         return terms
     
-
     def get_drift(
         self
     ):
@@ -190,7 +198,6 @@ class Transport:
 
         return body_fn
     
-
     def get_score(
         self,
     ):
@@ -204,9 +211,7 @@ class Transport:
             score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_velocity(model(x, t, **kwargs), x, t)
         else:
             raise NotImplementedError()
-        
         return score_fn
-
 
 class Sampler:
     """Sampler class for the transport model"""
@@ -239,7 +244,6 @@ class Sampler:
                 self.drift(x, t, model, **kwargs) + diffusion_fn(x, t) * self.score(x, t, model, **kwargs)
     
         sde_diffusion = diffusion_fn
-
         return sde_drift, sde_diffusion
     
     def __get_last_step(
@@ -322,16 +326,13 @@ class Sampler:
         )
 
         last_step_fn = self.__get_last_step(sde_drift, last_step=last_step, last_step_size=last_step_size)
-            
 
         def _sample(init, model, **model_kwargs):
             xs = _sde.sample(init, model, **model_kwargs)
             ts = th.ones(init.size(0), device=init.device) * t1
             x = last_step_fn(xs[-1], ts, model, **model_kwargs)
             xs.append(x)
-
             assert len(xs) == num_steps, "Samples does not match the number of steps"
-
             return xs
 
         return _sample
@@ -368,7 +369,6 @@ class Sampler:
         )
 
         return _ode.sample_backwards
-        
     
     def sample_ode(
         self,
@@ -413,7 +413,7 @@ class Sampler:
             atol=atol,
             rtol=rtol,
         )
-        
+
         return _ode.sample
 
     def sample_ode_likelihood(
@@ -424,7 +424,6 @@ class Sampler:
         atol=1e-6,
         rtol=1e-3,
     ):
-        
         """returns a sampling function for calculating likelihood with given ODE settings
         Args:
         - sampling_method: type of sampler used in solving the ODE; default to be Dopri5
