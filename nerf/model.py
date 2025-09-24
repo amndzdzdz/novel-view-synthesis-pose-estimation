@@ -6,10 +6,8 @@ from typing import Optional
 
 import torch
 
-# Chunksize (Note: this isn't batchsize in the conventional sense. This only
-# specifies the number of rays to be queried in one go. Backprop still happens
-# only after all rays from the current "bundle" are queried and rendered).
-chunksize = 16384  # Use chunksize of about 4096 to fit in ~1.4 GB of GPU memory.
+# Use chunksize of about 4096 to fit in ~1.4 GB of GPU memory
+chunksize = 16384.
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def get_minibatches(inputs: torch.Tensor, chunksize: Optional[int] = 1024 * 8):
@@ -42,8 +40,6 @@ def cumprod_exclusive(tensor: torch.Tensor):
 	cumprod (torch.Tensor): cumprod of Tensor along dim=-1, mimiciking the functionality of
 	  tf.math.cumprod(..., exclusive=True) (see `tf.math.cumprod` for details).
 	"""
-	# TESTED
-	# Only works for the last dimension (dim=-1)
 	dim = -1
 	# Compute regular cumprod first (this is equivalent to `tf.math.cumprod(..., exclusive=False)`).
 	cumprod = torch.cumprod(tensor, dim)
@@ -51,7 +47,6 @@ def cumprod_exclusive(tensor: torch.Tensor):
 	cumprod = torch.roll(cumprod, 1, dim)
 	# Replace the first element by "1" as this is what tf.cumprod(..., exclusive=True) does.
 	cumprod[..., 0] = 1.
-
 	return cumprod
 
 def get_ray_bundle(height: int, width: int, focal_length: float, tform_cam2world: torch.Tensor):
@@ -74,7 +69,6 @@ def get_ray_bundle(height: int, width: int, focal_length: float, tform_cam2world
 	  passing through the pixel at row index `j` and column index `i`.
 	  (TODO: double check if explanation of row and col indices convention is right).
 	"""
-	# TESTED
 	ii, jj = meshgrid_xy(
 	  torch.arange(width).to(tform_cam2world),
 	  torch.arange(height).to(tform_cam2world)
@@ -119,21 +113,15 @@ def compute_query_points_from_rays(
 	depth_values (torch.Tensor): Sampled depth values along each ray
 	  (shape: :math:`(num_samples)`).
 	"""
-	# TESTED
-	# shape: (num_samples)
 	depth_values = torch.linspace(near_thresh, far_thresh, num_samples).to(ray_origins)
 	if randomize is True:
-		# ray_origins: (width, height, 3)
-		# noise_shape = (width, height, num_samples)
 		noise_shape = list(ray_origins.shape[:-1]) + [num_samples]
-		# depth_values: (num_samples)
+
 		depth_values = depth_values \
 		    + torch.rand(noise_shape).to(ray_origins) * (far_thresh
 		        - near_thresh) / num_samples
-	# (width, height, num_samples, 3) = (width, height, 1, 3) + (width, height, 1, 3) * (num_samples, 1)
-	# query_points:  (width, height, num_samples, 3)
+
 	query_points = ray_origins[..., None, :] + ray_directions[..., None, :] * depth_values[..., :, None]
-	# TODO: Double-check that `depth_values` returned is of shape `(num_samples)`.
 	return query_points, depth_values
 
 def render_volume_density(
@@ -159,7 +147,6 @@ def render_volume_density(
 	acc_map (torch.Tensor): # TODO: Double-check (I think this is the accumulated
 	  transmittance map).
 	"""
-	# TESTED
 	sigma_a = torch.nn.functional.relu(radiance_field[..., 3])
 	rgb = torch.sigmoid(radiance_field[..., :3])
 	one_e_10 = torch.tensor([1e10], dtype=ray_origins.dtype, device=ray_origins.device)
@@ -171,7 +158,6 @@ def render_volume_density(
 	rgb_map = (weights[..., None] * rgb).sum(dim=-2)
 	depth_map = (weights * depth_values).sum(dim=-1)
 	acc_map = weights.sum(-1)
-
 	return rgb_map, depth_map, acc_map
 
 def positional_encoding(
@@ -191,11 +177,7 @@ def positional_encoding(
     Returns:
         (torch.Tensor): Positional encoding of the input tensor.
     """
-    # TESTED
-    # Trivially, the input tensor is added to the positional encoding.
     encoding = [tensor] if include_input else []
-    # Now, encode the input using a set of high-frequency functions and append the
-    # resulting values to the encoding.
     frequency_bands = None
     if log_sampling:
         frequency_bands = 2.0 ** torch.linspace(
@@ -217,8 +199,7 @@ def positional_encoding(
     for freq in frequency_bands:
         for func in [torch.sin, torch.cos]:
             encoding.append(func(tensor * freq))
-
-    # Special case, for no positional encoding
+            
     if len(encoding) == 1:
         return encoding[0]
     else:
