@@ -11,7 +11,7 @@ from diffusers.models import AutoencoderKL
 
 from download import find_model
 from models import SiT_models
-from train_utils import parse_ode_args, parse_sde_args, parse_transport_args
+from flow_matching.utils.train_utils import parse_ode_args, parse_sde_args, parse_transport_args
 from transport import create_transport, Sampler
 
 torch.backends.cuda.matmul.allow_tf32 = True
